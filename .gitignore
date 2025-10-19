@@ -1,0 +1,16 @@
+**/bin/
+**/obj/
+.vs/
+*.user
+*.suo
+*.swp
+*.log
+*.tmp
+# secretos
+.env*
+appsettings.*.Local.json
+appsettings.Local.json
+/README.md
+/src/Api/appsettings.json
+/src/Api/appsettings.json
+/src/Api/appsettings.Development.json
