@@ -1,0 +1,57 @@
+name: backend-ci
+
+on:
+  pull_request:
+    branches: [ main ]
+    paths: [ "**", ".github/workflows/backend-ci.yml" ]
+  push:
+    branches: [ main ]
+    paths: [ "**", ".github/workflows/backend-ci.yml" ]
+
+concurrency:
+  group: backend-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-and-migrate:
+    runs-on: ubuntu-latest
+
+    services:
+      mssql:
+        image: mcr.microsoft.com/mssql/server:2022-latest
+        env:
+          ACCEPT_EULA: "Y"
+          SA_PASSWORD: ${{ secrets.CI_MSSQL_SA_PASSWORD }}
+        ports: [ "1433:1433" ]
+        options: >-
+          --health-cmd "/opt/mssql-tools18/bin/sqlcmd -C -S localhost -U sa -P ${{ secrets.CI_MSSQL_SA_PASSWORD }} -Q 'SELECT 1'"
+          --health-interval 10s --health-timeout 5s --health-retries 20
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "8.0.x"
+
+      - name: Restore
+        run: dotnet restore
+
+      - name: Build
+        run: dotnet build --configuration Release --no-restore
+
+      # 👇 Aplica las migraciones contra el SQL del servicio de arriba
+      - name: Apply EF migrations against CI SQL
+        env:
+          # Ajusta este connection string si tu clave en appsettings tiene otro nombre
+          ConnectionStrings__ConnectionString: "Server=localhost,1433;Database=EcommerceCI;User Id=sa;Password=${{ secrets.CI_MSSQL_SA_PASSWORD }};TrustServerCertificate=True;MultipleActiveResultSets=True"
+          JwtSettings__Key: ${{ secrets.CI_JWT_KEY }}
+        run: |
+          dotnet tool restore
+          # ⬇️ Cambia el --project/--startup-project si tu API vive en otra carpeta
+          dotnet ef database update --project src/Api/ --startup-project src/Api/
+
+      # (Opcional) tests: no bloquea el PR de inicio
+      - name: Unit tests (si tienes)
+        run: dotnet test --no-build --verbosity normal || true
