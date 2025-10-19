@@ -2,9 +2,12 @@ name: backend-ci
 
 on:
   pull_request:
-    branches: [ main ]
+    branches: [ main ]             
   push:
-    branches: [ main ]
+    branches:                     
+      - main
+      - ci/**
+      - ci/*
 
 concurrency:
   group: backend-${{ github.ref }}
@@ -26,8 +29,9 @@ jobs:
           ACCEPT_EULA: "Y"
           SA_PASSWORD: ${{ secrets.CI_MSSQL_SA_PASSWORD }}
         ports: [ "1433:1433" ]
+     
         options: >-
-          --health-cmd="/opt/mssql-tools18/bin/sqlcmd -C -S 127.0.0.1 -U sa -P ${{ secrets.CI_MSSQL_SA_PASSWORD }} -Q 'SELECT 1'"
+          --health-cmd="/opt/mssql-tools18/bin/sqlcmd -C -S localhost -U sa -P ${{ secrets.CI_MSSQL_SA_PASSWORD }} -Q 'SELECT 1'"
           --health-interval=10s --health-timeout=5s --health-retries=20
 
     steps:
@@ -46,29 +50,39 @@ jobs:
       - name: Build
         run: dotnet build --configuration Release --no-restore
 
+    
       - name: Install dotnet-ef
         run: dotnet tool install --global dotnet-ef
 
       - name: Add dotnet tools to PATH
         shell: bash
-        run: echo "$HOME/.dotnet/tools" >> $GITHUB_PATH
+        run: echo "$HOME/.dotnet/tools" >> "$GITHUB_PATH"
 
-      - name: Wait for SQL to be healthy
+      
+      - name: Wait for SQL to accept connections
+        shell: bash
         run: |
-          for i in {1..30}; do
-            /opt/mssql-tools18/bin/sqlcmd -C -S 127.0.0.1 -U sa -P "${{ secrets.CI_MSSQL_SA_PASSWORD }}" -Q "SELECT 1" && break
+          for i in {1..60}; do
+            (echo > /dev/tcp/127.0.0.1/1433) >/dev/null 2>&1 && echo "SQL port ready" && break
             echo "SQL not ready yet..."; sleep 2
           done
 
-      # 👇 Aplica las migraciones contra el SQL del servicio
+      
       - name: Apply EF migrations against CI SQL
         env:
+          
           ConnectionStrings__ConnectionString: "Server=127.0.0.1,1433;Database=EcommerceCI;User Id=sa;Password=${{ secrets.CI_MSSQL_SA_PASSWORD }};TrustServerCertificate=True;MultipleActiveResultSets=True"
           JwtSettings__Key: ${{ secrets.CI_JWT_KEY }}
+        shell: bash
         run: |
-          # Ajusta las rutas si tu API vive en otra carpeta
-          dotnet ef database update --project src/Api/ --startup-project src/Api/
+          set -e
+          for i in {1..30}; do
+            dotnet ef database update --project src/Api/ --startup-project src/Api/ && exit 0
+            echo "EF update failed, retrying in 5s... ($i/30)"; sleep 5
+          done
+          echo "EF migrations never succeeded" >&2
+          exit 1
 
-      # (Opcional) tests: no bloquean el PR
+      
       - name: Unit tests (non-blocking)
         run: dotnet test --no-build --verbosity normal || true
