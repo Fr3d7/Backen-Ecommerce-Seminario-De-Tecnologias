@@ -15,7 +15,6 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 25
 
-    # Elevamos los secrets a env del job y luego referimos env.*
     env:
       MSSQL_SA_PASSWORD: ${{ secrets.CI_MSSQL_SA_PASSWORD }}
       JWT_KEY: ${{ secrets.CI_JWT_KEY }}
@@ -28,13 +27,11 @@ jobs:
         image: mcr.microsoft.com/mssql/server:2022-latest
         env:
           ACCEPT_EULA: "Y"
+          MSSQL_PID: "Developer"
           SA_PASSWORD: ${{ env.MSSQL_SA_PASSWORD }}
         ports:
-          - "1433:1433"
-        # Healthcheck DENTRO del contenedor (intenta tools18 y, si no está, tools clásico)
-        options: >-
-          --health-cmd="bash -lc '(/opt/mssql-tools18/bin/sqlcmd -C -S localhost -U sa -P $MSSQL_SA_PASSWORD -Q \"SELECT 1\" || /opt/mssql-tools/bin/sqlcmd -S localhost -U sa -P $MSSQL_SA_PASSWORD -Q \"SELECT 1\")'"
-          --health-interval=5s --health-timeout=5s --health-retries=60
+          - 1433:1433
+        # 👇 SIN healthcheck; lo hacemos desde un paso
 
     steps:
       - uses: actions/checkout@v4
@@ -43,25 +40,22 @@ jobs:
         with:
           dotnet-version: "8.0.x"
 
-      # ✅ Espera usando el healthcheck del CONTENEDOR (NO usa sqlcmd en el host)
-      - name: Wait for SQL (via Docker health)
+      - run: dotnet restore
+      - run: dotnet build --configuration Release --no-restore
+
+      # Espera por apertura de TCP 1433 (no necesita sqlcmd)
+      - name: Wait for SQL TCP 1433
         shell: bash
         run: |
-          for i in {1..90}; do
-            status=$(docker inspect -f '{{.State.Health.Status}}' ${{ job.services.mssql.id }}) || true
-            echo "mssql health: $status"
-            if [ "$status" = "healthy" ]; then exit 0; fi
-            sleep 2
+          for i in {1..120}; do
+            if (echo > /dev/tcp/127.0.0.1/1433) >/dev/null 2>&1; then
+              echo "SQL TCP is accepting connections"; exit 0
+            fi
+            echo "SQL not ready yet... ($i)"; sleep 2
           done
-          echo "mssql not healthy after waiting"
-          docker logs ${{ job.services.mssql.id }}
+          echo "SQL did not open port 1433"
+          docker logs ${{ job.services.mssql.id }} || true
           exit 1
-
-      - name: Restore
-        run: dotnet restore
-
-      - name: Build
-        run: dotnet build --configuration Release --no-restore
 
       - name: Install EF tools
         run: dotnet tool install --global dotnet-ef
@@ -72,8 +66,8 @@ jobs:
 
       - name: Apply EF migrations
         env:
-          ConnectionStrings__ConnectionString: "Server=localhost,1433;Database=EcommerceCI;User Id=sa;Password=${{ env.MSSQL_SA_PASSWORD }};TrustServerCertificate=True;MultipleActiveResultSets=True"
-          ConnectionStrings__DefaultConnection: "Server=localhost,1433;Database=EcommerceCI;User Id=sa;Password=${{ env.MSSQL_SA_PASSWORD }};TrustServerCertificate=True;MultipleActiveResultSets=True"
+          ConnectionStrings__ConnectionString: "Server=127.0.0.1,1433;Database=EcommerceCI;User Id=sa;Password=${{ env.MSSQL_SA_PASSWORD }};TrustServerCertificate=True;MultipleActiveResultSets=True"
+          ConnectionStrings__DefaultConnection: "Server=127.0.0.1,1433;Database=EcommerceCI;User Id=sa;Password=${{ env.MSSQL_SA_PASSWORD }};TrustServerCertificate=True;MultipleActiveResultSets=True"
           JwtSettings__Key: ${{ env.JWT_KEY }}
         run: dotnet ef database update --project src/Api/ --startup-project src/Api/
 
