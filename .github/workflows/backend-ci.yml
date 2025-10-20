@@ -16,56 +16,41 @@ jobs:
     timeout-minutes: 25
 
     env:
+      MSSQL_SA_PASSWORD: ${{ secrets.CI_MSSQL_SA_PASSWORD }}
+      JWT_KEY: ${{ secrets.CI_JWT_KEY }}
       DOTNET_NOLOGO: true
       DOTNET_CLI_TELEMETRY_OPTOUT: 1
       ASPNETCORE_ENVIRONMENT: CI
-      MSSQL_SA_PASSWORD: ${{ secrets.CI_MSSQL_SA_PASSWORD }}
-      JWT_KEY: ${{ secrets.CI_JWT_KEY }}
+
+    services:
+      mssql:
+        image: mcr.microsoft.com/mssql/server:2022-latest
+        env:
+          ACCEPT_EULA: "Y"
+          SA_PASSWORD: ${{ env.MSSQL_SA_PASSWORD }}
+        ports:
+          - 1433:1433
+        options: >-
+          --health-cmd "/opt/mssql-tools18/bin/sqlcmd -C -S localhost -U sa -P ${{ env.MSSQL_SA_PASSWORD }} -Q 'SELECT 1'"
+          --health-interval 5s --health-timeout 5s --health-retries 60
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      # SDK 8 para compilar + runtime 7 para correr EF si tu proyecto es net7.0
+      # SDK 8 (proyecto/EF9) + runtime 7 (lo pedía el CLI en tu log)
       - name: Setup .NET SDKs (8 + 7)
         uses: actions/setup-dotnet@v4
         with:
           dotnet-version: |
             8.0.x
             7.0.x
-          cache: true
+          # ❌ sin "cache", para evitar el error del lock file
 
       - name: Restore
         run: dotnet restore
 
-      - name: Build (Release)
+      - name: Build
         run: dotnet build --configuration Release --no-restore
-
-      # 🚀 Levantamos SQL Server con docker (sin usar 'services:' para poder inyectar secretos)
-      - name: Start SQL Server container
-        shell: bash
-        run: |
-          docker rm -f ci-mssql 2>/dev/null || true
-          docker run -d --name ci-mssql \
-            -e "ACCEPT_EULA=Y" \
-            -e "MSSQL_SA_PASSWORD=$MSSQL_SA_PASSWORD" \
-            -p 1433:1433 \
-            mcr.microsoft.com/mssql/server:2022-latest
-
-      # ⏳ Espera robusta al puerto 1433; no dependemos de sqlcmd
-      - name: Wait for SQL to be ready
-        shell: bash
-        run: |
-          echo "Waiting for SQL Server on 127.0.0.1:1433 ..."
-          for i in {1..90}; do
-            (echo > /dev/tcp/127.0.0.1/1433) >/dev/null 2>&1 && ok=1 && break || ok=0
-            sleep 2
-          done
-          if [ "$ok" != "1" ]; then
-            echo "SQL did not open port 1433 in time"; docker logs ci-mssql | tail -n 200; exit 1
-          fi
-          # dar unos segundos extra para que acepte logins
-          sleep 15
 
       - name: Install EF tools
         run: dotnet tool install --global dotnet-ef
@@ -76,15 +61,10 @@ jobs:
 
       - name: Apply EF migrations
         env:
-          ConnectionStrings__ConnectionString: "Server=127.0.0.1,1433;Database=EcommerceCI;User Id=sa;Password=${{ env.MSSQL_SA_PASSWORD }};TrustServerCertificate=True;MultipleActiveResultSets=True"
-          ConnectionStrings__DefaultConnection: "Server=127.0.0.1,1433;Database=EcommerceCI;User Id=sa;Password=${{ env.MSSQL_SA_PASSWORD }};TrustServerCertificate=True;MultipleActiveResultSets=True"
+          ConnectionStrings__ConnectionString: "Server=localhost,1433;Database=EcommerceCI;User Id=sa;Password=${{ env.MSSQL_SA_PASSWORD }};TrustServerCertificate=True;MultipleActiveResultSets=True"
+          ConnectionStrings__DefaultConnection: "Server=localhost,1433;Database=EcommerceCI;User Id=sa;Password=${{ env.MSSQL_SA_PASSWORD }};TrustServerCertificate=True;MultipleActiveResultSets=True"
           JwtSettings__Key: ${{ env.JWT_KEY }}
         run: dotnet ef database update --project src/Api/ --startup-project src/Api/
 
       - name: Unit tests (non-blocking)
         run: dotnet test --no-build --verbosity normal || true
-
-      # Si algo falla, mostramos logs del contenedor para ver rápido el motivo
-      - name: Dump SQL logs on failure
-        if: failure()
-        run: docker logs ci-mssql | tail -n 200
