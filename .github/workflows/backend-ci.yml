@@ -19,7 +19,7 @@ jobs:
       MSSQL_SA_PASSWORD: ${{ secrets.CI_MSSQL_SA_PASSWORD }}
       JWT_KEY: ${{ secrets.CI_JWT_KEY }}
       DOTNET_NOLOGO: true
-      DOTNET_CLI_TELEMETRY_OPTOUT: "1"
+      DOTNET_CLI_TELEMETRY_OPTOUT: 1
       ASPNETCORE_ENVIRONMENT: CI
 
     services:
@@ -27,35 +27,31 @@ jobs:
         image: mcr.microsoft.com/mssql/server:2022-latest
         env:
           ACCEPT_EULA: "Y"
-          MSSQL_PID: "Developer"
           SA_PASSWORD: ${{ env.MSSQL_SA_PASSWORD }}
         ports:
           - 1433:1433
-        # 👇 SIN healthcheck; lo hacemos desde un paso
+        options: >-
+          --health-cmd "/opt/mssql-tools18/bin/sqlcmd -C -S localhost -U sa -P ${{ env.MSSQL_SA_PASSWORD }} -Q 'SELECT 1'"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 60
 
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions/setup-dotnet@v4
+      - name: Setup .NET SDKs (8 + 7 runtime required by your project)
+        uses: actions/setup-dotnet@v4
         with:
-          dotnet-version: "8.0.x"
+          dotnet-version: |
+            8.0.x
+            7.0.x
+          cache: true
 
-      - run: dotnet restore
-      - run: dotnet build --configuration Release --no-restore
+      - name: Restore
+        run: dotnet restore
 
-      # Espera por apertura de TCP 1433 (no necesita sqlcmd)
-      - name: Wait for SQL TCP 1433
-        shell: bash
-        run: |
-          for i in {1..120}; do
-            if (echo > /dev/tcp/127.0.0.1/1433) >/dev/null 2>&1; then
-              echo "SQL TCP is accepting connections"; exit 0
-            fi
-            echo "SQL not ready yet... ($i)"; sleep 2
-          done
-          echo "SQL did not open port 1433"
-          docker logs ${{ job.services.mssql.id }} || true
-          exit 1
+      - name: Build
+        run: dotnet build --configuration Release --no-restore
 
       - name: Install EF tools
         run: dotnet tool install --global dotnet-ef
@@ -66,8 +62,8 @@ jobs:
 
       - name: Apply EF migrations
         env:
-          ConnectionStrings__ConnectionString: "Server=127.0.0.1,1433;Database=EcommerceCI;User Id=sa;Password=${{ env.MSSQL_SA_PASSWORD }};TrustServerCertificate=True;MultipleActiveResultSets=True"
-          ConnectionStrings__DefaultConnection: "Server=127.0.0.1,1433;Database=EcommerceCI;User Id=sa;Password=${{ env.MSSQL_SA_PASSWORD }};TrustServerCertificate=True;MultipleActiveResultSets=True"
+          ConnectionStrings__ConnectionString: "Server=localhost,1433;Database=EcommerceCI;User Id=sa;Password=${{ env.MSSQL_SA_PASSWORD }};TrustServerCertificate=True;MultipleActiveResultSets=True"
+          ConnectionStrings__DefaultConnection: "Server=localhost,1433;Database=EcommerceCI;User Id=sa;Password=${{ env.MSSQL_SA_PASSWORD }};TrustServerCertificate=True;MultipleActiveResultSets=True"
           JwtSettings__Key: ${{ env.JWT_KEY }}
         run: dotnet ef database update --project src/Api/ --startup-project src/Api/
 
