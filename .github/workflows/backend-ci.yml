@@ -15,7 +15,6 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 25
 
-    # Subimos los secretos a variables de entorno del job
     env:
       MSSQL_SA_PASSWORD: ${{ secrets.CI_MSSQL_SA_PASSWORD }}
       JWT_KEY: ${{ secrets.CI_JWT_KEY }}
@@ -30,16 +29,31 @@ jobs:
           ACCEPT_EULA: "Y"
           SA_PASSWORD: ${{ env.MSSQL_SA_PASSWORD }}
         ports:
-          - "1433:1433"
+          - 1433:1433
+        options: >-
+          --health-cmd "/opt/mssql-tools18/bin/sqlcmd -C -S localhost -U sa -P $MSSQL_SA_PASSWORD -Q 'SELECT 1'"
+          --health-interval 5s --health-timeout 5s --health-retries 60
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Setup .NET 8
-        uses: actions/setup-dotnet@v4
+      - uses: actions/setup-dotnet@v4
         with:
           dotnet-version: "8.0.x"
+
+      # ✅ Espera al healthcheck del contenedor (sin usar sqlcmd en el host)
+      - name: Wait for SQL to be healthy
+        shell: bash
+        run: |
+          for i in {1..60}; do
+            status=$(docker inspect -f '{{.State.Health.Status}}' ${{ job.services.mssql.id }})
+            echo "mssql health: $status"
+            if [ "$status" = "healthy" ]; then exit 0; fi
+            sleep 2
+          done
+          echo "mssql is NOT healthy"
+          docker logs ${{ job.services.mssql.id }}
+          exit 1
 
       - name: Restore
         run: dotnet restore
@@ -54,26 +68,12 @@ jobs:
         shell: bash
         run: echo "$HOME/.dotnet/tools" >> $GITHUB_PATH
 
-      # Espera activa hasta que SQL acepte conexiones
-      - name: Wait for SQL to be healthy
-        shell: bash
-        run: |
-          for i in {1..120}; do
-            /opt/mssql-tools18/bin/sqlcmd -C -S localhost -U sa -P "$MSSQL_SA_PASSWORD" -Q "SELECT 1" && exit 0
-            echo "SQL not ready yet... ($i)"; sleep 2
-          done
-          echo "SQL NOT healthy after waiting"; exit 1
-
       - name: Apply EF migrations
         env:
           ConnectionStrings__ConnectionString: "Server=localhost,1433;Database=EcommerceCI;User Id=sa;Password=${{ env.MSSQL_SA_PASSWORD }};TrustServerCertificate=True;MultipleActiveResultSets=True"
           ConnectionStrings__DefaultConnection: "Server=localhost,1433;Database=EcommerceCI;User Id=sa;Password=${{ env.MSSQL_SA_PASSWORD }};TrustServerCertificate=True;MultipleActiveResultSets=True"
           JwtSettings__Key: ${{ env.JWT_KEY }}
-        run: |
-          dotnet ef database update \
-            --project src/Api/Ecommerce.Api.csproj \
-            --startup-project src/Api/Ecommerce.Api.csproj
+        run: dotnet ef database update --project src/Api/ --startup-project src/Api/
 
-      # Opcional: que no bloquee
       - name: Unit tests (non-blocking)
         run: dotnet test --no-build --verbosity normal || true
