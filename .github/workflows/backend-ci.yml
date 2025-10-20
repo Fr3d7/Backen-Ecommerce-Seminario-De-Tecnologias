@@ -28,37 +28,23 @@ jobs:
         ports:
           - 1433:1433
         options: >-
-          --health-cmd "/opt/mssql-tools18/bin/sqlcmd -C -S localhost -U sa -P ${{ secrets.CI_MSSQL_SA_PASSWORD }} -Q 'SELECT 1'"
-          --health-interval 5s
-          --health-timeout 5s
-          --health-retries 60
+          --health-cmd="/opt/mssql-tools18/bin/sqlcmd -C -S 127.0.0.1 -U sa -P ${{ secrets.CI_MSSQL_SA_PASSWORD }} -Q 'SELECT 1'"
+          --health-interval=5s --health-timeout=5s --health-retries=60
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
 
-      - uses: actions/setup-dotnet@v4
+      - name: Setup .NET 8
+        uses: actions/setup-dotnet@v4
         with:
           dotnet-version: "8.0.x"
 
-      # Espera a que el contenedor SQL del servicio esté healthy (usando Docker)
-      - name: Wait for SQL to be healthy
-        shell: bash
-        run: |
-          for i in {1..120}; do
-            status=$(docker inspect -f '{{.State.Health.Status}}' ${{ job.services.mssql.id }})
-            echo "SQL health: $status"
-            if [ "$status" = "healthy" ]; then exit 0; fi
-            sleep 1
-          done
-          echo "SQL is not healthy"
-          docker logs ${{ job.services.mssql.id }}
-          exit 1
+      - name: Restore (solution)
+        run: dotnet restore EcommerceSolution.sln
 
-      - name: Restore
-        run: dotnet restore
-
-      - name: Build
-        run: dotnet build --configuration Release --no-restore
+      - name: Build (Release)
+        run: dotnet build EcommerceSolution.sln --configuration Release --no-restore
 
       - name: Install EF tools
         run: dotnet tool install --global dotnet-ef
@@ -67,14 +53,42 @@ jobs:
         shell: bash
         run: echo "$HOME/.dotnet/tools" >> $GITHUB_PATH
 
-      - name: Apply EF migrations
-        env:
-          # dejo ambos nombres por si tu appsettings usa DefaultConnection
-          ConnectionStrings__ConnectionString: "Server=localhost,1433;Database=EcommerceCI;User Id=sa;Password=${{ secrets.CI_MSSQL_SA_PASSWORD }};TrustServerCertificate=True;MultipleActiveResultSets=True"
-          ConnectionStrings__DefaultConnection: "Server=localhost,1433;Database=EcommerceCI;User Id=sa;Password=${{ secrets.CI_MSSQL_SA_PASSWORD }};TrustServerCertificate=True;MultipleActiveResultSets=True"
-          JwtSettings__Key: ${{ secrets.CI_JWT_KEY }}
-        run: dotnet ef database update --project src/Api/ --startup-project src/Api/
+      # Espera explícita al health del contenedor
+      - name: Wait for SQL to be healthy
+        shell: bash
+        run: |
+          for i in {1..120}; do
+            status=$(docker inspect -f '{{.State.Health.Status}}' ${{ job.services.mssql.id }})
+            echo "SQL health: $status"
+            if [ "$status" = "healthy" ]; then
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "SQL is not healthy after waiting"
+          docker logs ${{ job.services.mssql.id }}
+          exit 1
 
-      # Opcional: que no bloquee
+      - name: dotnet-ef version
+        run: dotnet ef --version
+
+      - name: Apply EF migrations
+        # 👉 Si solo quieres que el PR pase SÍ o SÍ hoy, descomenta la línea de abajo:
+        # continue-on-error: true
+        env:
+          # cubrimos ambos nombres comunes de connection string
+          ConnectionStrings__ConnectionString: "Server=127.0.0.1,1433;Database=EcommerceCI;User Id=sa;Password=${{ secrets.CI_MSSQL_SA_PASSWORD }};Encrypt=False;TrustServerCertificate=True;MultipleActiveResultSets=True"
+          ConnectionStrings__DefaultConnection: "Server=127.0.0.1,1433;Database=EcommerceCI;User Id=sa;Password=${{ secrets.CI_MSSQL_SA_PASSWORD }};Encrypt=False;TrustServerCertificate=True;MultipleActiveResultSets=True"
+          JwtSettings__Key: ${{ secrets.CI_JWT_KEY }}
+        run: |
+          # Ajusta si tu API vive en otra carpeta
+          dotnet ef database update --project src/Api/ --startup-project src/Api/ --verbose
+
+      # Logs de diagnóstico si algo falla antes
+      - name: Dump SQL logs on failure
+        if: failure()
+        run: docker logs ${{ job.services.mssql.id }}
+
+      # (Opcional) tests no bloqueantes
       - name: Unit tests (non-blocking)
-        run: dotnet test --no-restore --no-build || true
+        run: dotnet test --no-build --verbosity normal || true
