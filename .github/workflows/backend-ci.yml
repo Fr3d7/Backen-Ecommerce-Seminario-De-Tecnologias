@@ -4,9 +4,7 @@ on:
   pull_request:
     branches: [ main ]
   push:
-    branches:
-      - main
-      - 'ci/**'
+    branches: [ main ]
 
 concurrency:
   group: backend-${{ github.ref }}
@@ -15,14 +13,11 @@ concurrency:
 jobs:
   build-and-migrate:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 25
     env:
       DOTNET_NOLOGO: true
       DOTNET_CLI_TELEMETRY_OPTOUT: 1
       ASPNETCORE_ENVIRONMENT: CI
-      # ⬇️ Ajusta estas rutas si tu API vive en otra carpeta
-      EF_PROJECT: src/Ecommerce.Api/
-      EF_STARTUP: src/Ecommerce.Api/
 
     services:
       mssql:
@@ -34,17 +29,30 @@ jobs:
           - 1433:1433
         options: >-
           --health-cmd "/opt/mssql-tools18/bin/sqlcmd -C -S localhost -U sa -P ${{ secrets.CI_MSSQL_SA_PASSWORD }} -Q 'SELECT 1'"
-          --health-interval 10s --health-timeout 5s --health-retries 20
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 60
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Setup .NET 8
-        uses: actions/setup-dotnet@v4
+      - uses: actions/setup-dotnet@v4
         with:
           dotnet-version: "8.0.x"
-          cache: true
+
+      # Espera a que el contenedor SQL del servicio esté healthy (usando Docker)
+      - name: Wait for SQL to be healthy
+        shell: bash
+        run: |
+          for i in {1..120}; do
+            status=$(docker inspect -f '{{.State.Health.Status}}' ${{ job.services.mssql.id }})
+            echo "SQL health: $status"
+            if [ "$status" = "healthy" ]; then exit 0; fi
+            sleep 1
+          done
+          echo "SQL is not healthy"
+          docker logs ${{ job.services.mssql.id }}
+          exit 1
 
       - name: Restore
         run: dotnet restore
@@ -52,32 +60,21 @@ jobs:
       - name: Build
         run: dotnet build --configuration Release --no-restore
 
-      - name: Install dotnet-ef
+      - name: Install EF tools
         run: dotnet tool install --global dotnet-ef
 
       - name: Add dotnet tools to PATH
         shell: bash
-        run: echo "$HOME/.dotnet/tools" >> "$GITHUB_PATH"
+        run: echo "$HOME/.dotnet/tools" >> $GITHUB_PATH
 
-      # Espera simple a que el puerto 1433 responda (sin sqlcmd en el host)
-      - name: Wait for SQL to be ready
-        shell: bash
-        run: |
-          for i in {1..60}; do
-            (echo > /dev/tcp/127.0.0.1/1433) >/dev/null 2>&1 && { echo "SQL is up"; exit 0; }
-            echo "Waiting for SQL... ($i/60)"; sleep 2
-          done
-          echo "SQL did not become ready in time" >&2
-          exit 1
-
-      - name: Apply EF migrations against CI SQL
+      - name: Apply EF migrations
         env:
-          # Ajusta la clave si en appsettings se llama distinto
-          ConnectionStrings__ConnectionString: "Server=127.0.0.1,1433;Database=EcommerceCI;User Id=sa;Password=${{ secrets.CI_MSSQL_SA_PASSWORD }};TrustServerCertificate=True;MultipleActiveResultSets=True"
+          # dejo ambos nombres por si tu appsettings usa DefaultConnection
+          ConnectionStrings__ConnectionString: "Server=localhost,1433;Database=EcommerceCI;User Id=sa;Password=${{ secrets.CI_MSSQL_SA_PASSWORD }};TrustServerCertificate=True;MultipleActiveResultSets=True"
+          ConnectionStrings__DefaultConnection: "Server=localhost,1433;Database=EcommerceCI;User Id=sa;Password=${{ secrets.CI_MSSQL_SA_PASSWORD }};TrustServerCertificate=True;MultipleActiveResultSets=True"
           JwtSettings__Key: ${{ secrets.CI_JWT_KEY }}
-        run: |
-          dotnet ef database update --project "$EF_PROJECT" --startup-project "$EF_STARTUP"
+        run: dotnet ef database update --project src/Api/ --startup-project src/Api/
 
-      # Opcional: no bloquea el PR si hay tests que fallan
+      # Opcional: que no bloquee
       - name: Unit tests (non-blocking)
-        run: dotnet test --no-build --verbosity normal || true
+        run: dotnet test --no-restore --no-build || true
