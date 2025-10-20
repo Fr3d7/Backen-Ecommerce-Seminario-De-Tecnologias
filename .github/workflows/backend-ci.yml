@@ -2,12 +2,11 @@ name: backend-ci
 
 on:
   pull_request:
-    branches: [ main ]             
+    branches: [ main ]
   push:
-    branches:                     
+    branches:
       - main
-      - ci/**
-      - ci/*
+      - 'ci/**'
 
 concurrency:
   group: backend-${{ github.ref }}
@@ -21,6 +20,9 @@ jobs:
       DOTNET_NOLOGO: true
       DOTNET_CLI_TELEMETRY_OPTOUT: 1
       ASPNETCORE_ENVIRONMENT: CI
+      # ⬇️ Ajusta estas rutas si tu API vive en otra carpeta
+      EF_PROJECT: src/Ecommerce.Api/
+      EF_STARTUP: src/Ecommerce.Api/
 
     services:
       mssql:
@@ -28,11 +30,11 @@ jobs:
         env:
           ACCEPT_EULA: "Y"
           SA_PASSWORD: ${{ secrets.CI_MSSQL_SA_PASSWORD }}
-        ports: [ "1433:1433" ]
-     
+        ports:
+          - 1433:1433
         options: >-
-          --health-cmd="/opt/mssql-tools18/bin/sqlcmd -C -S localhost -U sa -P ${{ secrets.CI_MSSQL_SA_PASSWORD }} -Q 'SELECT 1'"
-          --health-interval=10s --health-timeout=5s --health-retries=20
+          --health-cmd "/opt/mssql-tools18/bin/sqlcmd -C -S localhost -U sa -P ${{ secrets.CI_MSSQL_SA_PASSWORD }} -Q 'SELECT 1'"
+          --health-interval 10s --health-timeout 5s --health-retries 20
 
     steps:
       - name: Checkout
@@ -50,7 +52,6 @@ jobs:
       - name: Build
         run: dotnet build --configuration Release --no-restore
 
-    
       - name: Install dotnet-ef
         run: dotnet tool install --global dotnet-ef
 
@@ -58,31 +59,25 @@ jobs:
         shell: bash
         run: echo "$HOME/.dotnet/tools" >> "$GITHUB_PATH"
 
-      
-      - name: Wait for SQL to accept connections
+      # Espera simple a que el puerto 1433 responda (sin sqlcmd en el host)
+      - name: Wait for SQL to be ready
         shell: bash
         run: |
           for i in {1..60}; do
-            (echo > /dev/tcp/127.0.0.1/1433) >/dev/null 2>&1 && echo "SQL port ready" && break
-            echo "SQL not ready yet..."; sleep 2
+            (echo > /dev/tcp/127.0.0.1/1433) >/dev/null 2>&1 && { echo "SQL is up"; exit 0; }
+            echo "Waiting for SQL... ($i/60)"; sleep 2
           done
-
-      
-      - name: Apply EF migrations against CI SQL
-        env:
-          
-          ConnectionStrings__ConnectionString: "Server=127.0.0.1,1433;Database=EcommerceCI;User Id=sa;Password=${{ secrets.CI_MSSQL_SA_PASSWORD }};TrustServerCertificate=True;MultipleActiveResultSets=True"
-          JwtSettings__Key: ${{ secrets.CI_JWT_KEY }}
-        shell: bash
-        run: |
-          set -e
-          for i in {1..30}; do
-            dotnet ef database update --project src/Api/ --startup-project src/Api/ && exit 0
-            echo "EF update failed, retrying in 5s... ($i/30)"; sleep 5
-          done
-          echo "EF migrations never succeeded" >&2
+          echo "SQL did not become ready in time" >&2
           exit 1
 
-      
+      - name: Apply EF migrations against CI SQL
+        env:
+          # Ajusta la clave si en appsettings se llama distinto
+          ConnectionStrings__ConnectionString: "Server=127.0.0.1,1433;Database=EcommerceCI;User Id=sa;Password=${{ secrets.CI_MSSQL_SA_PASSWORD }};TrustServerCertificate=True;MultipleActiveResultSets=True"
+          JwtSettings__Key: ${{ secrets.CI_JWT_KEY }}
+        run: |
+          dotnet ef database update --project "$EF_PROJECT" --startup-project "$EF_STARTUP"
+
+      # Opcional: no bloquea el PR si hay tests que fallan
       - name: Unit tests (non-blocking)
         run: dotnet test --no-build --verbosity normal || true
