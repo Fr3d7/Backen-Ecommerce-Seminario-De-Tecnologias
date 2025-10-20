@@ -16,35 +16,36 @@ jobs:
     timeout-minutes: 25
 
     env:
+      # levantamos secretos a variables del job (para usarlos en steps)
       MSSQL_SA_PASSWORD: ${{ secrets.CI_MSSQL_SA_PASSWORD }}
       JWT_KEY: ${{ secrets.CI_JWT_KEY }}
+      ASPNETCORE_ENVIRONMENT: CI
       DOTNET_NOLOGO: true
       DOTNET_CLI_TELEMETRY_OPTOUT: 1
-      ASPNETCORE_ENVIRONMENT: CI
 
     services:
       mssql:
         image: mcr.microsoft.com/mssql/server:2022-latest
         env:
           ACCEPT_EULA: "Y"
-          SA_PASSWORD: ${{ env.MSSQL_SA_PASSWORD }}
+          # aquí SÍ podemos usar secrets; esto queda dentro del contenedor
+          SA_PASSWORD: ${{ secrets.CI_MSSQL_SA_PASSWORD }}
         ports:
           - 1433:1433
+        # NO usamos expresiones aquí. Solo timers del healthcheck.
         options: >-
-          --health-cmd "/opt/mssql-tools18/bin/sqlcmd -C -S localhost -U sa -P ${{ env.MSSQL_SA_PASSWORD }} -Q 'SELECT 1'"
-          --health-interval 5s --health-timeout 5s --health-retries 60
+          --health-interval 10s --health-timeout 5s --health-retries 60
 
     steps:
       - uses: actions/checkout@v4
 
-      # SDK 8 (proyecto/EF9) + runtime 7 (lo pedía el CLI en tu log)
+      # SDK 8 (EF 9) + runtime 7 (tu proyecto net7.0). Sin cache para evitar el lock-file.
       - name: Setup .NET SDKs (8 + 7)
         uses: actions/setup-dotnet@v4
         with:
           dotnet-version: |
             8.0.x
             7.0.x
-          # ❌ sin "cache", para evitar el error del lock file
 
       - name: Restore
         run: dotnet restore
@@ -52,19 +53,33 @@ jobs:
       - name: Build
         run: dotnet build --configuration Release --no-restore
 
+      # Espera robusta al puerto 1433 (sin sqlcmd)
+      - name: Wait for SQL (port 1433)
+        shell: bash
+        run: |
+          for i in {1..120}; do
+            (echo > /dev/tcp/localhost/1433) >/dev/null 2>&1 && { echo "SQL port open"; exit 0; }
+            echo "SQL not ready yet... ($i)"; sleep 2
+          done
+          echo "SQL did not open port 1433"
+          docker logs ${{ job.services.mssql.id }}
+          exit 1
+
       - name: Install EF tools
         run: dotnet tool install --global dotnet-ef
 
       - name: Add dotnet tools to PATH
         shell: bash
-        run: echo "$HOME/.dotnet/tools" >> $GITHUB_PATH
+        run: echo "$HOME/.dotnet/tools" >> "$GITHUB_PATH"
 
       - name: Apply EF migrations
         env:
+          # usamos las env del job (permitido en steps)
           ConnectionStrings__ConnectionString: "Server=localhost,1433;Database=EcommerceCI;User Id=sa;Password=${{ env.MSSQL_SA_PASSWORD }};TrustServerCertificate=True;MultipleActiveResultSets=True"
           ConnectionStrings__DefaultConnection: "Server=localhost,1433;Database=EcommerceCI;User Id=sa;Password=${{ env.MSSQL_SA_PASSWORD }};TrustServerCertificate=True;MultipleActiveResultSets=True"
           JwtSettings__Key: ${{ env.JWT_KEY }}
         run: dotnet ef database update --project src/Api/ --startup-project src/Api/
 
+      # Opcional: no bloquea
       - name: Unit tests (non-blocking)
         run: dotnet test --no-build --verbosity normal || true
