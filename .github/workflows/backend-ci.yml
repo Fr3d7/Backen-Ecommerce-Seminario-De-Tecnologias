@@ -15,11 +15,12 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 25
 
+    # Elevamos los secrets a env del job y luego referimos env.*
     env:
       MSSQL_SA_PASSWORD: ${{ secrets.CI_MSSQL_SA_PASSWORD }}
       JWT_KEY: ${{ secrets.CI_JWT_KEY }}
       DOTNET_NOLOGO: true
-      DOTNET_CLI_TELEMETRY_OPTOUT: 1
+      DOTNET_CLI_TELEMETRY_OPTOUT: "1"
       ASPNETCORE_ENVIRONMENT: CI
 
     services:
@@ -29,10 +30,11 @@ jobs:
           ACCEPT_EULA: "Y"
           SA_PASSWORD: ${{ env.MSSQL_SA_PASSWORD }}
         ports:
-          - 1433:1433
+          - "1433:1433"
+        # Healthcheck DENTRO del contenedor (intenta tools18 y, si no está, tools clásico)
         options: >-
-          --health-cmd "/opt/mssql-tools18/bin/sqlcmd -C -S localhost -U sa -P $MSSQL_SA_PASSWORD -Q 'SELECT 1'"
-          --health-interval 5s --health-timeout 5s --health-retries 60
+          --health-cmd="bash -lc '(/opt/mssql-tools18/bin/sqlcmd -C -S localhost -U sa -P $MSSQL_SA_PASSWORD -Q \"SELECT 1\" || /opt/mssql-tools/bin/sqlcmd -S localhost -U sa -P $MSSQL_SA_PASSWORD -Q \"SELECT 1\")'"
+          --health-interval=5s --health-timeout=5s --health-retries=60
 
     steps:
       - uses: actions/checkout@v4
@@ -41,17 +43,17 @@ jobs:
         with:
           dotnet-version: "8.0.x"
 
-      # ✅ Espera al healthcheck del contenedor (sin usar sqlcmd en el host)
-      - name: Wait for SQL to be healthy
+      # ✅ Espera usando el healthcheck del CONTENEDOR (NO usa sqlcmd en el host)
+      - name: Wait for SQL (via Docker health)
         shell: bash
         run: |
-          for i in {1..60}; do
-            status=$(docker inspect -f '{{.State.Health.Status}}' ${{ job.services.mssql.id }})
+          for i in {1..90}; do
+            status=$(docker inspect -f '{{.State.Health.Status}}' ${{ job.services.mssql.id }}) || true
             echo "mssql health: $status"
             if [ "$status" = "healthy" ]; then exit 0; fi
             sleep 2
           done
-          echo "mssql is NOT healthy"
+          echo "mssql not healthy after waiting"
           docker logs ${{ job.services.mssql.id }}
           exit 1
 
