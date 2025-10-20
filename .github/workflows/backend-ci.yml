@@ -40,11 +40,11 @@ jobs:
       - uses: actions/checkout@v4
 
       # SDK 8 (EF 9) + runtime 7 (tu proyecto net7.0). Sin cache para evitar el lock-file.
-      - name: Setup .NET SDKs (8 + 7)
+      - name: Setup .NET SDKs  7
         uses: actions/setup-dotnet@v4
         with:
           dotnet-version: |
-            6.0.0
+            7.0.0
 
       - name: Restore
         run: dotnet restore
